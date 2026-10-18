@@ -1,0 +1,26 @@
+# User-specific stock data
+data/*.db
+!data/.gitkeep
+uploads/*
+!uploads/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+backend/backend.log
+
+# Node source deps (dist will be committed for easy deployment)
+frontend/node_modules/
+
+# OS
+.DS_Store
+
+# User-specific config (copy from config.example.json)
+backend/config.json
+frontend/tsconfig.tsbuildinfo
+backend/knowledge_base/custom_*.md
+
+# User-specific stock attribution seeds (may contain private data)
+scripts/seed_02718_attribution.py
+scripts/*_local*.py

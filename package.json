@@ -1,0 +1,10 @@
+{
+  "name": "hk-stock-panel",
+  "version": "1.0.0",
+  "description": "HK Stock CCASS Monitoring Dashboard - Track participant flows, Southbound Connect, anomaly signals, and shareholder selloff pressure. Locally deployed, no cloud.",
+  "author": "stevenshi-vibe",
+  "license": "CC-BY-NC-4.0",
+  "keywords": ["hk-stock", "ccass", "stock-monitoring", "hkex", "southbound-connect", "finance", "trading", "ir-tools"],
+  "repository": {"type": "git", "url": "https://github.com/stevenshi-vibe/hk-stock-panel.git"},
+  "private": true
+}

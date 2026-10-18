@@ -1,0 +1,25 @@
+{
+  "port": 3003,
+  "llm": {
+    "enabled": false,
+    "provider": "openai",
+    "api_key": "",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini"
+  },
+  "notification": {
+    "enabled": false,
+    "webhook_url": "",
+    "events": ["selloff_large", "new_big_holder"]
+  },
+  "company": {
+    "name": "",
+    "ir_email": "",
+    "logo_url": ""
+  },
+  "auto_fetch": {
+    "enabled": false,
+    "time": "17:30",
+    "days": 90
+  }
+}

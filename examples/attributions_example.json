@@ -1,0 +1,58 @@
+[
+  {
+    "shareholder_name": "Example Strategic Investor",
+    "participant_id": "C00001",
+    "participant_name": "Example Custodian Bank",
+    "shares_baseline": 10000000,
+    "investor_type": "战略投资者",
+    "unlock_date": "2026-07-30",
+    "rule": "wpp_first",
+    "sell_start_date": "2026-07-28",
+    "sell_end_date": "2026-08-18",
+    "confidence": "high",
+    "static_shares": 0,
+    "notes": "Example: first seller on a mixed custodian seat, 100% cleared by sell_end_date"
+  },
+  {
+    "shareholder_name": "Example PE Fund",
+    "participant_id": "C00001",
+    "participant_name": "Example Custodian Bank",
+    "shares_baseline": null,
+    "investor_type": "VC/PE",
+    "unlock_date": "2026-07-30",
+    "rule": "citi_kpcb",
+    "sell_start_date": "2026-08-19",
+    "sell_end_date": null,
+    "confidence": "high",
+    "static_shares": 0,
+    "notes": "Example: after first seller clears, all net outflows on this seat = this shareholder"
+  },
+  {
+    "shareholder_name": "Example Founder/Static Holder",
+    "participant_id": "B00001",
+    "participant_name": "Example Broker",
+    "shares_baseline": 50000000,
+    "investor_type": "创始人",
+    "unlock_date": null,
+    "rule": "static",
+    "sell_start_date": null,
+    "sell_end_date": null,
+    "confidence": "high",
+    "static_shares": 50000000,
+    "notes": "Example: static holding, no selling"
+  },
+  {
+    "shareholder_name": "Example Sole Holder",
+    "participant_id": "B00002",
+    "participant_name": "Example Broker 2",
+    "shares_baseline": 5000000,
+    "investor_type": "机构",
+    "unlock_date": null,
+    "rule": "all_flow",
+    "sell_start_date": null,
+    "sell_end_date": null,
+    "confidence": "high",
+    "static_shares": 0,
+    "notes": "Example: sole shareholder on this seat, all net flows count"
+  }
+]
