@@ -161,6 +161,10 @@ const translations = {
 
     // CCASS tab
     southboundDailyNet: '南向资金每日净买卖 (万股)',
+    ccassRange: '天数范围',
+    ccassBackfillShort: '已有数据不足、正在补抓',
+    ccassHoldingsTrend: 'CCASS 持股走势 (万股)',
+    ccassDailyTable: 'CCASS 每日汇总',
     participantHoldings: '席位持仓明细',
     exportExcel: '📥 导出Excel',
     exporting: '导出中...',
@@ -484,6 +488,10 @@ const translations = {
 
     // CCASS tab
     southboundDailyNet: 'Southbound Daily Net Buy/Sell (10K shares)',
+    ccassRange: 'Range',
+    ccassBackfillShort: 'Stored history is short; backfilling now',
+    ccassHoldingsTrend: 'CCASS Holdings Trend (10K shares)',
+    ccassDailyTable: 'CCASS Daily Summary',
     participantHoldings: 'Participant Holdings',
     exportExcel: '📥 Export Excel',
     exporting: 'Exporting...',

@@ -21,18 +21,20 @@ export const api = {
   getDashboard: (code: string) => fetchApi(`/stock/${code}/dashboard`),
   getInfo: (code: string) => fetchApi(`/stock/${code}/info`),
   getTrading: (code: string, days = 90) => fetchApi(`/stock/${code}/trading?days=${days}`),
-  getCcassTotal: (code: string, days = 90) => fetchApi(`/stock/${code}/ccass/total?days=${days}`),
+  getCcassTotal: (code: string, days = 60) => fetchApi(`/stock/${code}/ccass/total?days=${days}`),
   getParticipants: (code: string, date?: string) =>
     fetchApi(`/stock/${code}/ccass/participants${date ? `?date=${date}` : ''}`),
   getChanges: (code: string, date?: string) =>
     fetchApi(`/stock/${code}/ccass/changes${date ? `?date=${date}` : ''}`),
-  getDates: (code: string) => fetchApi(`/stock/${code}/ccass/dates`),
+  getDates: (code: string, days = 60) => fetchApi(`/stock/${code}/ccass/dates?days=${days}`),
+  ensureCcassRange: (code: string, days = 60) =>
+    fetchApi(`/stock/${code}/ccass/ensure?days=${days}`, { method: 'POST' }),
   getSignals: (code: string) => fetchApi(`/stock/${code}/signals`),
   getCostAnalysis: (code: string) => fetchApi(`/stock/${code}/cost-analysis`),
   getScenarioAnalysis: (code: string) => fetchApi(`/stock/${code}/scenario-analysis`),
   getCapitalFlow: (code: string, days = 5, endDate?: string) =>
     fetchApi(`/stock/${code}/capital-flow?days=${days}${endDate ? `&end_date=${encodeURIComponent(endDate)}` : ''}`),
-  getHkConnect: (code: string, days = 90) => fetchApi(`/stock/${code}/hk-connect?days=${days}`),
+  getHkConnect: (code: string, days = 60) => fetchApi(`/stock/${code}/hk-connect?days=${days}`),
 
   getAttribution: (code: string) => fetchApi(`/stock/${code}/attribution`),
   addAttribution: (code: string, data: any) =>

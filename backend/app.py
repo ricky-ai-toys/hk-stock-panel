@@ -75,16 +75,26 @@ def _run_fetch_job(job_id: str, code: str, days: int):
         trading_days = backfill_trading(code)
         _fetch_jobs[job_id].update({'trading_days': trading_days})
 
-        from scrapers.ccass_scraper import backfill_stock
+        from services.ccass_range import claim_ccass_backfill, run_ccass_backfill_leader
         _fetch_jobs[job_id].update({'stage': 'ccass'})
 
         def ccass_progress(done, total, date):
-            if total > 0:
+            if total > 0 and job_id in _fetch_jobs:
                 pct = min(95, 10 + int(done / total * 85))
                 _fetch_jobs[job_id]['progress'] = pct
                 _fetch_jobs[job_id]['current_date'] = date
 
-        ccass_days = backfill_stock(code, days=days, progress_callback=ccass_progress)
+        # Share the per-stock crawl with on-demand 180/365 fills so two jobs
+        # never hit HKEX for the same code at the same time.
+        leader, state = claim_ccass_backfill(code, days, job_id)
+        _fetch_jobs[job_id]['target_days'] = state['target_days']
+        if leader:
+            run_ccass_backfill_leader(code, state, progress_callback=ccass_progress)
+        else:
+            state['done'].wait()
+        if state.get('status') == 'error':
+            raise RuntimeError(state.get('error') or 'CCASS backfill failed')
+        ccass_days = state.get('fetched') or 0
         _fetch_jobs[job_id].update({'ccass_days': ccass_days})
 
         from services.selloff_engine import compute_selloff_range
@@ -272,7 +282,8 @@ def get_trading(stock_code: str, days: int = Query(90, ge=1, le=365)):
 # ============ CCASS Data ============
 
 @app.get("/api/stock/{stock_code}/ccass/total")
-def get_ccass_total(stock_code: str, days: int = Query(90, ge=1, le=365)):
+def get_ccass_total(stock_code: str, days: int = Query(60, ge=1, le=365)):
+    """CCASS total + southbound series. `days` is a trading-session count, max 365."""
     code = stock_code.zfill(5)
     with get_stock_conn(code) as conn:
         rows = conn.execute("""
@@ -351,12 +362,96 @@ def get_top10(stock_code: str):
 
 
 @app.get("/api/stock/{stock_code}/ccass/dates")
-def get_available_dates(stock_code: str):
-    """Get list of dates with CCASS data."""
+def get_available_dates(stock_code: str, days: int = Query(60, ge=1, le=365)):
+    """Get dates with CCASS data, newest first, capped at the requested window."""
     code = stock_code.zfill(5)
     with get_stock_conn(code) as conn:
-        rows = conn.execute("SELECT DISTINCT trade_date FROM ccass_participants ORDER BY trade_date DESC LIMIT 100").fetchall()
+        rows = conn.execute(
+            "SELECT DISTINCT trade_date FROM ccass_participants ORDER BY trade_date DESC LIMIT ?",
+            (days,),
+        ).fetchall()
         return {'dates': [r['trade_date'] for r in rows]}
+
+
+def _ccass_trade_dates(code: str) -> list[str]:
+    with get_stock_conn(code) as conn:
+        rows = conn.execute("SELECT DISTINCT trade_date FROM ccass_participants").fetchall()
+        return [r['trade_date'] for r in rows]
+
+
+def _start_ccass_ensure_job(code: str, state: dict) -> None:
+    """Background leader for an on-demand history fill. Uses the shared crawl lock."""
+    job_id = state['job_id']
+
+    def ccass_progress(done, total, date):
+        if total > 0 and job_id in _fetch_jobs:
+            _fetch_jobs[job_id]['progress'] = min(99, int(done / total * 100))
+            _fetch_jobs[job_id]['current_date'] = date
+            _fetch_jobs[job_id]['target_days'] = state['target_days']
+
+    def runner():
+        from services.ccass_range import run_ccass_backfill_leader
+        try:
+            run_ccass_backfill_leader(code, state, progress_callback=ccass_progress)
+            if state.get('status') == 'done':
+                update_stock_last_updated(code)
+                _fetch_jobs[job_id].update({
+                    'status': 'done', 'progress': 100, 'stage': 'complete',
+                    'ccass_days': state.get('fetched') or 0,
+                })
+            else:
+                _fetch_jobs[job_id].update({
+                    'status': 'error',
+                    'error': state.get('error') or 'CCASS backfill failed',
+                })
+        except Exception as e:
+            logger.error(f"CCASS ensure job {job_id} failed: {e}")
+            if job_id in _fetch_jobs:
+                _fetch_jobs[job_id].update({'status': 'error', 'error': str(e)})
+
+    threading.Thread(target=runner, daemon=True).start()
+
+
+@app.post("/api/stock/{stock_code}/ccass/ensure")
+def ensure_ccass_range(stock_code: str, days: int = Query(60, ge=1, le=365)):
+    """Return coverage for the requested window and backfill when history is short.
+
+    The crawl reuses backfill_stock (AntiBan rate limit, 2 workers, batches of 8).
+    A window that was just attempted is not queued again, so refreshing the tab
+    does not spray HKEX. 365 calendar days is the HKEX ceiling.
+    """
+    from services.ccass_range import (
+        assess_ccass_coverage,
+        claim_ccass_backfill,
+        should_skip_automatic_backfill,
+    )
+
+    code = stock_code.zfill(5)
+    ensure_stock(code)
+    coverage = assess_ccass_coverage(_ccass_trade_dates(code), days)
+    if coverage['sufficient']:
+        return {**coverage, 'backfill': 'idle', 'job_id': None}
+
+    recent = should_skip_automatic_backfill(code, days)
+    if recent and recent['status'] == 'running':
+        # target_days is already >= this request; join that crawl.
+        return {**coverage, 'backfill': 'running', 'job_id': recent['job_id']}
+    if recent and recent['status'] in ('done', 'error'):
+        return {**coverage, 'backfill': recent['status'], 'job_id': recent['job_id']}
+
+    job_id = uuid.uuid4().hex[:12]
+    leader, state = claim_ccass_backfill(code, days, job_id)
+    active_id = state['job_id']
+    if active_id not in _fetch_jobs:
+        _fetch_jobs[active_id] = {
+            'status': 'running', 'progress': 0, 'stage': 'ccass',
+            'code': code, 'target_days': state['target_days'],
+        }
+    else:
+        _fetch_jobs[active_id]['target_days'] = state['target_days']
+    if leader:
+        _start_ccass_ensure_job(code, state)
+    return {**coverage, 'backfill': 'running', 'job_id': active_id}
 
 
 # ============ IR: Shareholder Attribution ============
@@ -591,7 +686,7 @@ def export_excel(stock_code: str):
 # ============ HK Connect (Southbound) ============
 
 @app.get("/api/stock/{stock_code}/hk-connect")
-def get_hk_connect(stock_code: str, days: int = Query(90, ge=1, le=365)):
+def get_hk_connect(stock_code: str, days: int = Query(60, ge=1, le=365)):
     code = stock_code.zfill(5)
     with get_stock_conn(code) as conn:
         rows = conn.execute("""
@@ -699,7 +794,7 @@ def get_scenario_analysis(stock_code: str):
 # ============ Capital Flow ============
 
 @app.get("/api/stock/{stock_code}/capital-flow")
-def get_capital_flow(stock_code: str, days: int = Query(5, ge=1, le=90), end_date: str = Query(None)):
+def get_capital_flow(stock_code: str, days: int = Query(5, ge=1, le=365), end_date: str = Query(None)):
     """Get capital flow / Sankey data for shareholder → broker → buy/sell flows."""
     code = stock_code.zfill(5)
     ensure_stock(code)
