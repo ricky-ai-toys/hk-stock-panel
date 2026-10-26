@@ -364,7 +364,7 @@ def get_capital_flow(stock_code: str, days: int = 5, end_date: str | None = None
             return {'nodes': [], 'links': [], 'top_inflows': [], 'top_outflows': [], 'daily_flows': [], 'shareholder_flows': [], 'available_dates': []}
 
         available_date_rows = conn.execute(
-            "SELECT DISTINCT trade_date FROM ccass_daily_changes ORDER BY trade_date DESC LIMIT 180"
+            "SELECT DISTINCT trade_date FROM ccass_daily_changes ORDER BY trade_date DESC LIMIT 365"
         ).fetchall()
         available_dates = [r['trade_date'] for r in available_date_rows]
 

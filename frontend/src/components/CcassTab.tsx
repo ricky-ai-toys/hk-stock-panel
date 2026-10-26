@@ -1,29 +1,46 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { api, formatShares } from '../lib/api'
 import { useT } from '../lib/i18n'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+
+const CCASS_DAY_OPTIONS = [30, 60, 90, 180, 365]
+
+function axisInterval(count: number) {
+  if (count <= 40) return 0
+  return Math.max(0, Math.ceil(count / 8) - 1)
+}
 
 export default function CcassTab({ stockCode }: { stockCode: string }) {
   const [participants, setParticipants] = useState<any[]>([])
   const [hkConnect, setHkConnect] = useState<any[]>([])
+  const [totals, setTotals] = useState<any[]>([])
   const [selectedDate, setSelectedDate] = useState<string>('')
   const [dates, setDates] = useState<string[]>([])
+  const [days, setDays] = useState(60)
+  const [coverage, setCoverage] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [viewMode, setViewMode] = useState<'all' | 'changes'>('all')
   const [exporting, setExporting] = useState(false)
   const { t, brokerName } = useT()
+  const loadSeq = useRef(0)
 
   const load = async () => {
+    const seq = ++loadSeq.current
     setLoading(true)
     try {
-      const [datesRes, pRes, cRes, hkRes] = await Promise.all([
-        api.getDates(stockCode),
+      const [datesRes, pRes, cRes, hkRes, totalRes, cov] = await Promise.all([
+        api.getDates(stockCode, days),
         api.getParticipants(stockCode, selectedDate || undefined),
         api.getChanges(stockCode, selectedDate || undefined),
-        api.getHkConnect(stockCode, 90),
+        api.getHkConnect(stockCode, days),
+        api.getCcassTotal(stockCode, days),
+        api.ensureCcassRange(stockCode, days).catch(() => null),
       ])
-      setHkConnect(hkRes)
+      if (seq !== loadSeq.current) return
+      setHkConnect(Array.isArray(hkRes) ? hkRes : [])
+      setTotals(Array.isArray(totalRes) ? totalRes : [])
       setDates(datesRes.dates || [])
+      setCoverage(cov)
 
       const changesMap: Record<string, any> = {}
       cRes.changes?.forEach((c: any) => { changesMap[c.participant_id] = c })
@@ -37,11 +54,36 @@ export default function CcassTab({ stockCode }: { stockCode: string }) {
     } catch (e) {
       console.error(e)
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
   }
 
-  useEffect(() => { load() }, [stockCode, selectedDate])
+  useEffect(() => { load() }, [stockCode, selectedDate, days])
+
+  useEffect(() => {
+    if (!coverage || coverage.sufficient !== false || coverage.backfill !== 'running' || !coverage.job_id) return
+    let cancelled = false
+    let timer: number | undefined
+    const poll = async () => {
+      if (cancelled) return
+      try {
+        const status = await api.getJobStatus(coverage.job_id)
+        if (cancelled) return
+        if (status.status === 'done' || status.status === 'error') {
+          load()
+          return
+        }
+      } catch {
+        // The job row can appear a moment after ensure returns.
+      }
+      if (!cancelled) timer = window.setTimeout(poll, 5000)
+    }
+    timer = window.setTimeout(poll, 5000)
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [coverage?.job_id, coverage?.backfill, coverage?.sufficient, stockCode, selectedDate, days])
 
   const handleExport = () => {
     setExporting(true)
@@ -50,9 +92,14 @@ export default function CcassTab({ stockCode }: { stockCode: string }) {
   }
 
   const netBuyLabel = t('netBuy')
+  const holdingsLabel = t('ccassHoldings')
   const hkChartData = hkConnect.map((h: any) => ({
     date: h.trade_date?.slice(5),
     [netBuyLabel]: Math.round((h.shares_change || 0) / 10000),
+  }))
+  const totalChartData = totals.map((row: any) => ({
+    date: row.trade_date?.slice(5),
+    [holdingsLabel]: Math.round((row.total_shares || 0) / 10000),
   }))
 
   const filtered = participants
@@ -67,18 +114,91 @@ export default function CcassTab({ stockCode }: { stockCode: string }) {
 
   return (
     <div className="space-y-6">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <h2 className="text-lg font-semibold text-slate-800">{t('tab_ccass')}</h2>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-medium text-slate-500">{t('ccassRange')}</span>
+          {CCASS_DAY_OPTIONS.map(d => (
+            <button
+              key={d}
+              onClick={() => setDays(d)}
+              className={`px-3 py-1 text-sm rounded-md border transition-colors ${
+                days === d ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
+              }`}
+            >
+              {d}{t('daysUnit')}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {coverage && coverage.sufficient === false && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-2 rounded-lg text-sm">
+          {t('ccassBackfillShort')}
+        </div>
+      )}
+
+      <div className="card">
+        <h3 className="font-semibold text-slate-800 mb-4">{t('ccassHoldingsTrend')}</h3>
+        <ResponsiveContainer width="100%" height={220}>
+          <LineChart data={totalChartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+            <XAxis dataKey="date" tick={{ fontSize: 11 }} interval={axisInterval(totalChartData.length)} />
+            <YAxis tick={{ fontSize: 11 }} />
+            <Tooltip />
+            <Line type="monotone" dataKey={holdingsLabel} stroke="#2563eb" strokeWidth={2} dot={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
       {/* Southbound bar chart */}
       <div className="card">
         <h3 className="font-semibold text-slate-800 mb-4">{t('southboundDailyNet')}</h3>
         <ResponsiveContainer width="100%" height={220}>
-          <BarChart data={hkChartData.slice(-30)}>
+          <BarChart data={hkChartData}>
             <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-            <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+            <XAxis dataKey="date" tick={{ fontSize: 11 }} interval={axisInterval(hkChartData.length)} />
             <YAxis tick={{ fontSize: 11 }} />
             <Tooltip />
             <Bar dataKey={netBuyLabel} fill="#8b5cf6" />
           </BarChart>
         </ResponsiveContainer>
+      </div>
+
+      <div className="card">
+        <h3 className="font-semibold text-slate-800 mb-4">{t('ccassDailyTable')}</h3>
+        {totals.length === 0 ? (
+          <div className="text-center py-8 text-slate-400 text-sm">{loading ? t('loading') : t('noCcassData')}</div>
+        ) : (
+          <div className="overflow-x-auto max-h-[360px] overflow-y-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-white">
+                <tr className="text-left text-slate-500 border-b">
+                  <th className="py-2">{t('date')}</th>
+                  <th className="py-2 text-right">{t('ccassHoldings')}</th>
+                  <th className="py-2 text-right">{t('pct')}</th>
+                  <th className="py-2 text-right">{t('southboundHoldings')}</th>
+                  <th className="py-2 text-right">{t('dailyChange')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...totals].reverse().map((row: any) => (
+                  <tr key={row.trade_date} className="border-b border-slate-100">
+                    <td className="py-2 font-mono text-xs">{row.trade_date}</td>
+                    <td className="py-2 text-right font-mono text-xs">{formatShares(row.total_shares)}</td>
+                    <td className="py-2 text-right text-xs">{row.pct_of_issued != null ? `${Number(row.pct_of_issued).toFixed(2)}%` : '—'}</td>
+                    <td className="py-2 text-right font-mono text-xs">{formatShares(row.hk_connect_shares)}</td>
+                    <td className={`py-2 text-right font-mono text-xs ${
+                      (row.hk_connect_change || 0) < 0 ? 'text-green-600' : (row.hk_connect_change || 0) > 0 ? 'text-red-600' : 'text-slate-400'
+                    }`}>
+                      {row.hk_connect_change != null ? (row.hk_connect_change > 0 ? '+' : '') + formatShares(row.hk_connect_change) : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Participants Table */}

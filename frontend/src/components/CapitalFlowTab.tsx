@@ -13,13 +13,18 @@ export default function CapitalFlowTab({ stockCode }: { stockCode: string }) {
   const [loading, setLoading] = useState(true)
   const [days, setDays] = useState(1)
   const [endDate, setEndDate] = useState<string>('')
+  const [coverage, setCoverage] = useState<any>(null)
   const { t, lang, brokerName } = useT()
 
   const load = async (d: number, ed?: string) => {
     setLoading(true)
     try {
-      const res = await api.getCapitalFlow(stockCode, d, ed || undefined)
+      const [res, cov] = await Promise.all([
+        api.getCapitalFlow(stockCode, d, ed || undefined),
+        api.ensureCcassRange(stockCode, d).catch(() => null),
+      ])
       setData(res)
+      setCoverage(cov)
     } catch (e) {
       console.error(e)
     } finally {
@@ -29,12 +34,65 @@ export default function CapitalFlowTab({ stockCode }: { stockCode: string }) {
 
   useEffect(() => { load(days, endDate) }, [stockCode, days, endDate])
 
-  if (loading) return <div className="text-center py-8 text-slate-400">{t('loading')}</div>
-  if (!data || (!data.top_inflows?.length && !data.top_outflows?.length && !data.shareholder_flows?.length)) {
+  useEffect(() => {
+    if (!coverage || coverage.sufficient !== false || coverage.backfill !== 'running' || !coverage.job_id) return
+    let cancelled = false
+    let timer: number | undefined
+    const poll = async () => {
+      if (cancelled) return
+      try {
+        const status = await api.getJobStatus(coverage.job_id)
+        if (cancelled) return
+        if (status.status === 'done' || status.status === 'error') {
+          load(days, endDate)
+          return
+        }
+      } catch {
+        // Job row can lag the ensure response.
+      }
+      if (!cancelled) timer = window.setTimeout(poll, 5000)
+    }
+    timer = window.setTimeout(poll, 5000)
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [coverage?.job_id, coverage?.backfill, coverage?.sufficient, stockCode, days, endDate])
+
+  const dayButtons = [1, 5, 10, 20, 60, 90, 180, 365].map(d => (
+    <button
+      key={d}
+      onClick={() => setDays(d)}
+      className={`px-3 py-1 text-sm rounded-md border transition-colors ${
+        days === d ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
+      }`}
+    >
+      {d}D
+    </button>
+  ))
+  const shortHistory = coverage && coverage.sufficient === false
+  const hasFlow = !!(data && (data.top_inflows?.length || data.top_outflows?.length || data.shareholder_flows?.length))
+
+  if (loading || !hasFlow) {
     return (
-      <div className="text-center py-12">
-        <p className="text-4xl mb-4">🌊</p>
-        <p className="text-slate-500">{t('noFlowData')}</p>
+      <div className="space-y-6">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <h2 className="text-lg font-semibold text-slate-800">🌊 {t('capitalFlow')}</h2>
+          <div className="flex items-center gap-2 flex-wrap">{dayButtons}</div>
+        </div>
+        {shortHistory && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-2 rounded-lg text-sm">
+            {t('ccassBackfillShort')}
+          </div>
+        )}
+        {loading ? (
+          <div className="text-center py-8 text-slate-400">{t('loading')}</div>
+        ) : (
+          <div className="text-center py-12">
+            <p className="text-4xl mb-4">🌊</p>
+            <p className="text-slate-500">{t('noFlowData')}</p>
+          </div>
+        )}
       </div>
     )
   }
@@ -103,19 +161,15 @@ export default function CapitalFlowTab({ stockCode }: { stockCode: string }) {
               ))}
             </select>
           </label>
-          {[1, 5, 10, 20, 60].map(d => (
-            <button
-              key={d}
-              onClick={() => setDays(d)}
-              className={`px-3 py-1 text-sm rounded-md border transition-colors ${
-                days === d ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
-              }`}
-            >
-              {d}D
-            </button>
-          ))}
+          {dayButtons}
         </div>
       </div>
+
+      {shortHistory && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-2 rounded-lg text-sm">
+          {t('ccassBackfillShort')}
+        </div>
+      )}
 
       {/* Top Inflows / Outflows Tables */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

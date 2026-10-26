@@ -476,88 +476,117 @@ def find_latest_query_date() -> str:
     return qd.strftime('%Y/%m/%d')
 
 
+def _participant_ids_before(conn, data_date: str) -> set:
+    """Participant ids on the latest stored session strictly before `data_date`."""
+    row = conn.execute(
+        "SELECT MAX(trade_date) as d FROM ccass_participants WHERE trade_date < ?",
+        (data_date,),
+    ).fetchone()
+    if not row or not row['d']:
+        return set()
+    return {
+        r['participant_id']
+        for r in conn.execute(
+            "SELECT participant_id FROM ccass_participants WHERE trade_date = ?",
+            (row['d'],),
+        )
+    }
+
+
 def backfill_stock(stock_code: str, start_date: str = None, days: int = 90, delay: float = 0.2,
-                   progress_callback=None, max_workers: int = 2):
+                   progress_callback=None, max_workers: int = 2, batch_size: int = None):
     """
-    Backfill CCASS data for a stock using parallel fetching.
+    Backfill CCASS data for a stock.
+
+    Dates are fetched in small batches with the existing AntiBan client
+    (per-host interval + max_workers, default 2). Each batch is saved before
+    the next one starts, so a 180/365-day fill does not queue the whole year
+    of HKEX requests up front. The calendar window is capped at 12 months.
+    `delay` is retained for callers; pacing itself lives in AntiBanClient.
     """
     from db import get_stock_conn, ensure_stock, update_stock_last_updated
+    from services.ccass_range import (
+        BACKFILL_BATCH_SIZE,
+        HKEX_CCASS_MAX_CALENDAR_DAYS,
+        chunked,
+        plan_backfill_query_dates,
+    )
 
     code = ensure_stock(stock_code)
     logger.info(f"Backfilling CCASS data for {code}, {days} days (parallel workers={max_workers})")
 
-    if start_date:
-        start = datetime.strptime(start_date, '%Y/%m/%d')
-    else:
-        end_qd = datetime.strptime(find_latest_query_date(), '%Y/%m/%d')
-        start = end_qd - timedelta(days=int(days * 1.6))
-
     end = datetime.strptime(find_latest_query_date(), '%Y/%m/%d')
-
-    # Collect all query dates and their expected data dates
     with get_stock_conn(code) as conn:
         existing = {r['trade_date'] for r in conn.execute("SELECT DISTINCT trade_date FROM ccass_participants").fetchall()}
+        prior_min_row = conn.execute("SELECT MIN(trade_date) as d FROM ccass_participants").fetchone()
+        prior_min = prior_min_row['d'] if prior_min_row else None
 
-    tasks = []
-    cur = start
-    while cur <= end:
-        if cur.weekday() < 5:
-            date_str = cur.strftime('%Y/%m/%d')
-            data_date = compute_query_to_data_date(date_str)
-            if data_date not in existing:
-                tasks.append((code, date_str))
-        cur += timedelta(days=1)
+    if start_date:
+        # Explicit start still cannot walk past the 12-month HKEX window.
+        requested_start = datetime.strptime(start_date, '%Y/%m/%d')
+        floor = end - timedelta(days=HKEX_CCASS_MAX_CALENDAR_DAYS)
+        start = requested_start if requested_start > floor else floor
+        tasks = []
+        cur = start
+        while cur <= end:
+            if cur.weekday() < 5:
+                date_str = cur.strftime('%Y/%m/%d')
+                data_date = compute_query_to_data_date(date_str)
+                if data_date not in existing:
+                    tasks.append(date_str)
+            cur += timedelta(days=1)
+    else:
+        tasks = plan_backfill_query_dates(existing, end, days, compute_query_to_data_date)
 
     total_tasks = len(tasks)
-    skipped = 0
     if total_tasks == 0:
         logger.info(f"No new dates to fetch for {code}")
-        # Still need to compute changes for existing dates if needed
         update_stock_last_updated(code)
         return 0
 
-    logger.info(f"Fetching {total_tasks} new dates for {code}")
-
-    results = {}
+    logger.info(f"Fetching {total_tasks} new dates for {code} in batches")
+    step = batch_size if batch_size else BACKFILL_BATCH_SIZE
+    workers = max(1, int(max_workers))
     done_count = 0
+    success_count = 0
+    saved_dates = []
 
-    # Fetch in parallel, but results must be saved in chronological order for change calculation
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_fetch_one_day, task): task for task in tasks}
-        for future in as_completed(futures):
-            try:
-                data_date, participants, ccass_total = future.result()
-                if participants:
-                    results[data_date] = (participants, ccass_total)
+    for batch in chunked(tasks, step):
+        results = {}
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_fetch_one_day, (code, query_date)): query_date for query_date in batch}
+            for future in as_completed(futures):
+                query_date = futures[future]
+                data_date = query_date.replace('/', '-')
+                try:
+                    data_date, participants, ccass_total = future.result()
+                    if participants:
+                        results[data_date] = (participants, ccass_total)
+                except Exception as e:
+                    logger.error(f"Future error: {e}")
                 done_count += 1
                 if progress_callback:
-                    pct = int(done_count / total_tasks * 100)
                     progress_callback(done_count, total_tasks, data_date)
+
+        for data_date in sorted(results):
+            participants, ccass_total = results[data_date]
+            try:
+                with get_stock_conn(code) as conn:
+                    prev_ids = _participant_ids_before(conn, data_date)
+                save_ccass_data(code, data_date, participants, ccass_total, prev_ids)
+                saved_dates.append(data_date)
+                success_count += 1
             except Exception as e:
-                logger.error(f"Future error: {e}")
-                done_count += 1
+                logger.error(f"Save error for {data_date}: {e}")
 
-    # Save results in chronological order (needed for change calculations)
-    sorted_dates = sorted(results.keys())
-    success_count = 0
-
-    with get_stock_conn(code) as conn:
-        prev_ids = set()
-        # Get prev_ids from last existing date
-        last_existing = conn.execute("SELECT MAX(trade_date) as d FROM ccass_participants").fetchone()
-        if last_existing and last_existing['d']:
-            prev_ids = {r['participant_id'] for r in conn.execute(
-                "SELECT participant_id FROM ccass_participants WHERE trade_date = ?", (last_existing['d'],)
-            )}
-
-    for data_date in sorted_dates:
-        participants, ccass_total = results[data_date]
+    # Prepending older sessions leaves the previous earliest day pointing at the
+    # wrong prior session. Recompute just that boundary row.
+    if prior_min and any(d < prior_min for d in saved_dates):
         try:
-            save_ccass_data(code, data_date, participants, ccass_total, prev_ids)
-            prev_ids = {p['participant_id'] for p in participants}
-            success_count += 1
+            with get_stock_conn(code) as conn:
+                _compute_daily_changes(conn, prior_min)
         except Exception as e:
-            logger.error(f"Save error for {data_date}: {e}")
+            logger.error(f"Boundary change recompute failed for {code} {prior_min}: {e}")
 
     update_stock_last_updated(code)
     logger.info(f"Backfill complete for {code}: {success_count}/{total_tasks} new dates")
