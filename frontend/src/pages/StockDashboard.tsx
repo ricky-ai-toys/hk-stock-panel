@@ -315,11 +315,14 @@ function OverviewTab({ code, name, trade, ccass, hk, signals, t30, top10, info, 
         />
         <KpiCard
           label={t('issuedShares')}
-          value={formatShares(issuedShares)}
+          value={issuedShares > 0 ? formatShares(issuedShares) : '-'}
           sub={info?.pe_ratio ? `PE ${info.pe_ratio}` : '-'}
           color="gray"
         />
       </div>
+      {ccassTotal > 0 && !ccassPct && (
+        <p className="text-xs text-slate-500 -mt-2">{t('pctNotDisclosed')}</p>
+      )}
 
       {/* Signal Verdict */}
       {signals?.anomalies?.length > 0 && (
@@ -363,7 +366,7 @@ function OverviewTab({ code, name, trade, ccass, hk, signals, t30, top10, info, 
                       <div className="text-xs text-slate-400 font-mono">{p.participant_id}</div>
                     </td>
                     <td className="py-2 text-right font-mono">{formatShares(p.shares)}</td>
-                    <td className="py-2 text-right text-slate-600">{p.pct_of_issued?.toFixed(2)}%</td>
+                    <td className="py-2 text-right text-slate-600">{p.pct_of_issued != null ? `${Number(p.pct_of_issued).toFixed(2)}%` : '—'}</td>
                   </tr>
                 ))}
               </tbody>

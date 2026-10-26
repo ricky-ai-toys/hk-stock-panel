@@ -84,6 +84,98 @@ def invalidate_form_cache():
         _form_cache.clear()
 
 
+def _cell_text(cell) -> str:
+    body = cell.find('div', class_='mobile-list-body')
+    return body.get_text(strip=True) if body else cell.get_text(strip=True)
+
+
+def _parse_ccass_summary(soup) -> Optional[dict]:
+    """Parse the CCASS total box. Percentage may be blank."""
+    summary_div = soup.find('div', class_='ccass-search-total')
+    if not summary_div:
+        return None
+
+    def value_of(cls: str):
+        box = summary_div.find('div', class_=cls)
+        if not box:
+            return None
+        val = box.find('div', class_='value')
+        if not val:
+            return None
+        return parse_number(val.get_text(strip=True).replace('%', ''))
+
+    total_shares = value_of('shareholding')
+    if not total_shares:
+        return None
+    return {
+        'total_shares': total_shares,
+        'total_pct': value_of('percent-of-participants'),
+        'participant_count': value_of('number-of-participants'),
+    }
+
+
+def _parse_participant_rows(soup) -> list[dict]:
+    """Parse CCASS participant rows.
+
+    HKEX drops the "% of issued shares/units" column — and leaves the summary
+    percentage blank — when it has no current issued-units figure. That happens
+    for some ETFs and leveraged products with daily creation/redemption
+    (reproduced on 07709). Identify columns by CSS class so a missing percent
+    column does not discard the shareholding rows.
+    """
+    tables = soup.find_all('table')
+    data_table = None
+    for table in tables:
+        if table.find('td', class_='col-shareholding'):
+            data_table = table
+            break
+    if data_table is None and len(tables) >= 2:
+        data_table = tables[1]
+    if data_table is None:
+        return []
+
+    participants = []
+    for row in data_table.find_all('tr'):
+        cells = row.find_all('td')
+        if not cells:
+            continue
+
+        by_class: dict[str, str] = {}
+        for cell in cells:
+            for cls in (cell.get('class') or []):
+                if cls.startswith('col-'):
+                    by_class[cls] = _cell_text(cell)
+
+        pct = None
+        if 'col-participant-id' in by_class or 'col-shareholding' in by_class:
+            pid = by_class.get('col-participant-id', '')
+            name = by_class.get('col-participant-name', '')
+            shares = parse_number(by_class.get('col-shareholding'))
+            pct_raw = by_class.get('col-shareholding-percent')
+            if pct_raw:
+                pct = parse_number(pct_raw.replace('%', ''))
+        else:
+            bodies = [_cell_text(c) for c in cells]
+            if len(bodies) < 4:
+                continue
+            pid = bodies[0]
+            name = bodies[1]
+            if '%' in bodies[-1]:
+                shares = parse_number(bodies[-2])
+                pct = parse_number(bodies[-1].replace('%', ''))
+            else:
+                shares = parse_number(bodies[-1])
+
+        if pid and shares is not None:
+            participants.append({
+                'participant_id': pid,
+                'participant_name': name,
+                'shares': shares,
+                'pct_of_issued': pct,
+            })
+    return participants
+
+
 def fetch_ccass_participants(stock_code: str, query_date: str) -> tuple[str, list[dict], Optional[dict]]:
     """
     Fetch CCASS participant holdings + total summary for a given stock and query date.
@@ -142,69 +234,8 @@ def fetch_ccass_participants(stock_code: str, query_date: str) -> tuple[str, lis
     if shown_code != code:
         return data_date, [], None
 
-    # Extract summary (total holdings) from the ccass-search-total div
-    ccass_total = None
-    summary_div = soup.find('div', class_='ccass-search-total')
-    if summary_div:
-        shares_div = summary_div.find('div', class_='shareholding')
-        pct_div = summary_div.find('div', class_='percent-of-participants')
-        count_div = summary_div.find('div', class_='number-of-participants')
-
-        total_shares = None
-        total_pct = None
-        participant_count = None
-
-        if shares_div:
-            val_div = shares_div.find('div', class_='value')
-            if val_div:
-                total_shares = parse_number(val_div.get_text(strip=True))
-        if pct_div:
-            val_div = pct_div.find('div', class_='value')
-            if val_div:
-                pct_text = val_div.get_text(strip=True).replace('%', '')
-                total_pct = parse_number(pct_text)
-        if count_div:
-            val_div = count_div.find('div', class_='value')
-            if val_div:
-                participant_count = parse_number(val_div.get_text(strip=True))
-
-        if total_shares:
-            ccass_total = {
-                'total_shares': total_shares,
-                'total_pct': total_pct,
-                'participant_count': participant_count,
-            }
-
-    tables = soup.find_all('table')
-    if len(tables) < 2:
-        return data_date, [], ccass_total
-
-    participants = []
-    data_table = tables[1]
-    rows = data_table.find_all('tr')
-
-    for row in rows[1:]:
-        cells = row.find_all('td')
-        if len(cells) < 5:
-            continue
-
-        def get_body(cell):
-            body = cell.find('div', class_='mobile-list-body')
-            return body.get_text(strip=True) if body else cell.get_text(strip=True)
-
-        pid = get_body(cells[0])
-        name = get_body(cells[1])
-        shares = parse_number(get_body(cells[3]))
-        pct = parse_number(get_body(cells[4]).replace('%', ''))
-
-        if pid and shares is not None:
-            participants.append({
-                'participant_id': pid,
-                'participant_name': name,
-                'shares': shares,
-                'pct_of_issued': pct,
-            })
-
+    ccass_total = _parse_ccass_summary(soup)
+    participants = _parse_participant_rows(soup)
     return data_date, participants, ccass_total
 
 

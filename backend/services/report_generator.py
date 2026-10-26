@@ -10,6 +10,13 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 
+def _fmt_issued_pct(value) -> str:
+    """HKEX leaves % of issued units blank for some ETFs. Don't crash the report."""
+    if value is None:
+        return '未披露'
+    return f'{value:.2f}%'
+
+
 def generate_report(stock_code: str, report_type: str = 'daily', mode: str = 'trader', use_ai: bool = False, lang: str = 'zh') -> dict:
     """
     Generate a stock report.
@@ -95,11 +102,16 @@ def generate_report(stock_code: str, report_type: str = 'daily', mode: str = 'tr
 
         ccass_section = {'title': '二、CCASS持仓变动', 'content': ''}
         if latest_ccass:
-            lines = [f"- 最新CCASS总持仓：{_fmt_shares(latest_ccass['total_shares'])}（占总股本 {latest_ccass['pct_of_issued']:.2f}%）"]
+            lines = [f"- 最新CCASS总持仓：{_fmt_shares(latest_ccass['total_shares'])}（占总股本 {_fmt_issued_pct(latest_ccass['pct_of_issued'])}）"]
             if start_ccass and start_ccass['total_shares']:
                 ccass_chg = latest_ccass['total_shares'] - start_ccass['total_shares']
-                ccass_pct_chg = latest_ccass['pct_of_issued'] - start_ccass['pct_of_issued']
-                lines.append(f"- 区间CCASS持仓变化：{_fmt_shares(ccass_chg)}（{ccass_pct_chg:+.2f}个百分点）")
+                latest_pct = latest_ccass['pct_of_issued']
+                start_pct = start_ccass['pct_of_issued']
+                if latest_pct is not None and start_pct is not None:
+                    ccass_pct_chg = latest_pct - start_pct
+                    lines.append(f"- 区间CCASS持仓变化：{_fmt_shares(ccass_chg)}（{ccass_pct_chg:+.2f}个百分点）")
+                else:
+                    lines.append(f"- 区间CCASS持仓变化：{_fmt_shares(ccass_chg)}")
 
             # Top movers
             latest_date = latest_ccass['trade_date']
@@ -132,7 +144,7 @@ def generate_report(stock_code: str, report_type: str = 'daily', mode: str = 'tr
         ).fetchone()
         hk_section = {'title': '三、南向资金', 'content': ''}
         if latest_hk:
-            lines = [f"- 最新南向持股：{_fmt_shares(latest_hk['shares'])}（占总股本 {latest_hk['pct_of_issued']:.2f}%）"]
+            lines = [f"- 最新南向持股：{_fmt_shares(latest_hk['shares'])}（占总股本 {_fmt_issued_pct(latest_hk['pct_of_issued'])}）"]
             # Period southbound change
             hk_series = conn.execute(
                 "SELECT * FROM hk_connect WHERE trade_date >= ? ORDER BY trade_date",
