@@ -296,7 +296,7 @@ class AntiBanClient:
                 resp.raise_for_status()
                 return resp
 
-            except (requests.ConnectionError, requests.Timeout, requests.ChunkedEncodingError) as e:
+            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as e:
                 self._record_failure(host)
                 consecutive_failures += 1
                 self._tl.failures = consecutive_failures

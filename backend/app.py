@@ -724,7 +724,7 @@ def get_dashboard(stock_code: str):
         trades_30d = conn.execute("""
             SELECT AVG(volume) as avg_vol, AVG(turnover) as avg_turnover,
                    MIN(low) as period_low, MAX(high) as period_high
-            FROM daily_trading ORDER BY trade_date DESC LIMIT 30
+            FROM (SELECT * FROM daily_trading ORDER BY trade_date DESC LIMIT 30)
         """).fetchone()
 
         # Top 10 holders

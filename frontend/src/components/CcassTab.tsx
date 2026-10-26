@@ -118,6 +118,10 @@ export default function CcassTab({ stockCode }: { stockCode: string }) {
           </div>
         </div>
 
+        {participants.length > 0 && participants.every((p: any) => p.pct_of_issued == null) && (
+          <p className="text-xs text-slate-500 mb-3">{t('pctNotDisclosed')}</p>
+        )}
+
         {loading ? (
           <div className="text-center py-8 text-slate-400">{t('loading')}</div>
         ) : (
@@ -141,7 +145,7 @@ export default function CcassTab({ stockCode }: { stockCode: string }) {
                       <div className="text-xs text-slate-400 font-mono">{p.participant_id}</div>
                     </td>
                     <td className="py-2 text-right font-mono text-xs">{formatShares(p.shares)}</td>
-                    <td className="py-2 text-right text-xs">{p.pct_of_issued?.toFixed(2)}%</td>
+                    <td className="py-2 text-right text-xs">{p.pct_of_issued != null ? `${Number(p.pct_of_issued).toFixed(2)}%` : '—'}</td>
                     <td className={`py-2 text-right font-mono text-xs ${
                       (p.shares_change || 0) < 0 ? 'text-green-600' : (p.shares_change || 0) > 0 ? 'text-red-600' : 'text-slate-400'
                     }`}>
