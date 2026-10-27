@@ -4,7 +4,7 @@ import { useT } from '../lib/i18n'
 
 interface Props {
   stocks: any[]
-  onSelectStock: (code: string) => void
+  onSelectStock: (code: string, jobId?: string) => void
   onStocksChange: () => void
 }
 
@@ -23,10 +23,10 @@ export default function HomePage({ stocks, onSelectStock, onStocksChange }: Prop
     setAdding(true)
     setError('')
     try {
-      await api.addStock(code)
+      const added = await api.addStock(code)
       onStocksChange()
       setCodeInput('')
-      onSelectStock(code)
+      onSelectStock(code, added.job_id)
     } catch (e: any) {
       setError(e.message || t('addFailed'))
     } finally {

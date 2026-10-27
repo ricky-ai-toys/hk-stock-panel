@@ -66,6 +66,31 @@ def get_stocks():
 _fetch_jobs: dict[str, dict] = {}
 
 
+def _broadcast_ccass_progress(state: dict, pct: int, date) -> None:
+    """Write one crawl's progress onto every job attached to it (leader and followers)."""
+    from services.ccass_range import record_ccass_progress
+    for jid in record_ccass_progress(state, pct, date):
+        job = _fetch_jobs.get(jid)
+        if not job or job.get('status') in ('done', 'error'):
+            continue
+        job['progress'] = pct
+        job['current_date'] = date
+        job['target_days'] = state.get('target_days')
+
+
+def _seed_follower_progress(job_id: str, state: dict) -> None:
+    """Copy the crawl's latest percent onto a job that joined after the last date finished."""
+    from services.ccass_range import shared_ccass_progress
+    pct, date = shared_ccass_progress(state)
+    job = _fetch_jobs.get(job_id)
+    if job is None or pct is None or job.get('status') in ('done', 'error'):
+        return
+    job['progress'] = pct
+    if date:
+        job['current_date'] = date
+    job['target_days'] = state.get('target_days')
+
+
 def _run_fetch_job(job_id: str, code: str, days: int):
     """Background task to fetch data for a stock."""
     _fetch_jobs[job_id] = {'status': 'running', 'progress': 0, 'stage': 'starting', 'code': code}
@@ -78,19 +103,20 @@ def _run_fetch_job(job_id: str, code: str, days: int):
         from services.ccass_range import claim_ccass_backfill, run_ccass_backfill_leader
         _fetch_jobs[job_id].update({'stage': 'ccass'})
 
-        def ccass_progress(done, total, date):
-            if total > 0 and job_id in _fetch_jobs:
-                pct = min(95, 10 + int(done / total * 85))
-                _fetch_jobs[job_id]['progress'] = pct
-                _fetch_jobs[job_id]['current_date'] = date
-
         # Share the per-stock crawl with on-demand 180/365 fills so two jobs
         # never hit HKEX for the same code at the same time.
         leader, state = claim_ccass_backfill(code, days, job_id)
         _fetch_jobs[job_id]['target_days'] = state['target_days']
+
+        def ccass_progress(done, total, date):
+            if total > 0:
+                pct = min(95, 10 + int(done / total * 85))
+                _broadcast_ccass_progress(state, pct, date)
+
         if leader:
             run_ccass_backfill_leader(code, state, progress_callback=ccass_progress)
         else:
+            _seed_follower_progress(job_id, state)
             state['done'].wait()
         if state.get('status') == 'error':
             raise RuntimeError(state.get('error') or 'CCASS backfill failed')
@@ -384,10 +410,9 @@ def _start_ccass_ensure_job(code: str, state: dict) -> None:
     job_id = state['job_id']
 
     def ccass_progress(done, total, date):
-        if total > 0 and job_id in _fetch_jobs:
-            _fetch_jobs[job_id]['progress'] = min(99, int(done / total * 100))
-            _fetch_jobs[job_id]['current_date'] = date
-            _fetch_jobs[job_id]['target_days'] = state['target_days']
+        if total > 0:
+            from services.ccass_range import ccass_ensure_progress_pct
+            _broadcast_ccass_progress(state, ccass_ensure_progress_pct(done, total), date)
 
     def runner():
         from services.ccass_range import run_ccass_backfill_leader

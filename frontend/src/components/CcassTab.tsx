@@ -18,6 +18,7 @@ export default function CcassTab({ stockCode }: { stockCode: string }) {
   const [dates, setDates] = useState<string[]>([])
   const [days, setDays] = useState(60)
   const [coverage, setCoverage] = useState<any>(null)
+  const [backfillProgress, setBackfillProgress] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [viewMode, setViewMode] = useState<'all' | 'changes'>('all')
   const [exporting, setExporting] = useState(false)
@@ -61,7 +62,10 @@ export default function CcassTab({ stockCode }: { stockCode: string }) {
   useEffect(() => { load() }, [stockCode, selectedDate, days])
 
   useEffect(() => {
-    if (!coverage || coverage.sufficient !== false || coverage.backfill !== 'running' || !coverage.job_id) return
+    if (!coverage || coverage.backfill !== 'running' || !coverage.job_id) {
+      setBackfillProgress(null)
+      return
+    }
     let cancelled = false
     let timer: number | undefined
     const poll = async () => {
@@ -69,6 +73,7 @@ export default function CcassTab({ stockCode }: { stockCode: string }) {
       try {
         const status = await api.getJobStatus(coverage.job_id)
         if (cancelled) return
+        if (typeof status.progress === 'number') setBackfillProgress(status.progress)
         if (status.status === 'done' || status.status === 'error') {
           load()
           return
@@ -76,14 +81,14 @@ export default function CcassTab({ stockCode }: { stockCode: string }) {
       } catch {
         // The job row can appear a moment after ensure returns.
       }
-      if (!cancelled) timer = window.setTimeout(poll, 5000)
+      if (!cancelled) timer = window.setTimeout(poll, 3000)
     }
-    timer = window.setTimeout(poll, 5000)
+    poll()
     return () => {
       cancelled = true
       if (timer) window.clearTimeout(timer)
     }
-  }, [coverage?.job_id, coverage?.backfill, coverage?.sufficient, stockCode, selectedDate, days])
+  }, [coverage?.job_id, coverage?.backfill, stockCode, selectedDate, days])
 
   const handleExport = () => {
     setExporting(true)
@@ -132,9 +137,10 @@ export default function CcassTab({ stockCode }: { stockCode: string }) {
         </div>
       </div>
 
-      {coverage && coverage.sufficient === false && (
+      {coverage?.backfill === 'running' && (
         <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-2 rounded-lg text-sm">
           {t('ccassBackfillShort')}
+          {backfillProgress != null ? ` ${backfillProgress}%` : ''}
         </div>
       )}
 

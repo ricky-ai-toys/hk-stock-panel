@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { api, formatNumber, formatPct, formatShares, formatMoney } from '../lib/api'
 import { useT } from '../lib/i18n'
 import LanguageSwitch from '../components/LanguageSwitch'
@@ -14,19 +14,22 @@ interface Props {
   stockCode: string
   onBack: () => void
   onStockUpdated: () => void
+  initialJobId?: string | null
 }
 
 type Tab = 'overview' | 'ccass' | 'trading' | 'signals' | 'reports' | 'ir' | 'cost' | 'flow'
 
-export default function StockDashboard({ stockCode, onBack, onStockUpdated }: Props) {
+export default function StockDashboard({ stockCode, onBack, onStockUpdated, initialJobId }: Props) {
   const [dashboard, setDashboard] = useState<any>(null)
   const [loading, setLoading] = useState(true)
-  const [fetching, setFetching] = useState(false)
+  const [fetching, setFetching] = useState(Boolean(initialJobId))
   const [fetchProgress, setFetchProgress] = useState<any>(null)
   const [tab, setTab] = useState<Tab>('overview')
   const [error, setError] = useState('')
-  const [jobPolling, setJobPolling] = useState(false)
+  const [jobPolling, setJobPolling] = useState(Boolean(initialJobId))
   const { t, stockName: stockNameI18n } = useT()
+  const pollGen = useRef(0)
+  const activeJobRef = useRef<string | null>(initialJobId || null)
 
   const loadDashboard = async () => {
     try {
@@ -34,7 +37,7 @@ export default function StockDashboard({ stockCode, onBack, onStockUpdated }: Pr
       setError('')
       const data = await api.getDashboard(stockCode)
       setDashboard(data)
-      if (!data.latest_trading && !data.latest_ccass && !fetching && !jobPolling) {
+      if (!data.latest_trading && !data.latest_ccass && !fetching && !jobPolling && !activeJobRef.current) {
         handleFetch()
       }
     } catch (e: any) {
@@ -44,17 +47,61 @@ export default function StockDashboard({ stockCode, onBack, onStockUpdated }: Pr
     }
   }
 
-  useEffect(() => {
-    loadDashboard()
-  }, [stockCode])
+  const stopWatchingJob = () => {
+    activeJobRef.current = null
+    setFetching(false)
+    setJobPolling(false)
+  }
+
+  const pollJob = (jobId: string, retries = 0) => {
+    const gen = ++pollGen.current
+    const check = async () => {
+      if (pollGen.current !== gen) return
+      try {
+        const res = await fetch(`/api/jobs/${jobId}`)
+        if (pollGen.current !== gen) return
+        if (res.status === 404) {
+          stopWatchingJob()
+          setFetchProgress(null)
+          await loadDashboard()
+          return
+        }
+        const status = await res.json()
+        if (pollGen.current !== gen) return
+        setFetchProgress(status)
+        if (status.status === 'done') {
+          stopWatchingJob()
+          setFetchProgress(null)
+          await loadDashboard()
+          onStockUpdated()
+        } else if (status.status === 'error') {
+          stopWatchingJob()
+          setError(t('fetchFailed') + ': ' + (status.error || 'unknown error'))
+        } else {
+          setTimeout(check, 3000)
+        }
+      } catch (e) {
+        if (pollGen.current !== gen) return
+        if (retries < 5) {
+          setTimeout(() => {
+            if (pollGen.current === gen) pollJob(jobId, retries + 1)
+          }, 5000)
+        } else {
+          stopWatchingJob()
+        }
+      }
+    }
+    check()
+  }
 
   const handleFetch = async () => {
-    if (fetching) return
+    if (fetching || activeJobRef.current) return
     setFetching(true)
     setError('')
     try {
       const result = await api.fetchStockData(stockCode, 90)
       if (result.job_id) {
+        activeJobRef.current = result.job_id
         setJobPolling(true)
         pollJob(result.job_id)
       } else {
@@ -63,48 +110,22 @@ export default function StockDashboard({ stockCode, onBack, onStockUpdated }: Pr
       }
     } catch (e: any) {
       setError(t('fetchFailed') + ': ' + e.message)
-      setFetching(false)
-      setJobPolling(false)
+      stopWatchingJob()
     }
   }
 
-  const pollJob = (jobId: string, retries = 0) => {
-    const check = async () => {
-      try {
-        const res = await fetch(`/api/jobs/${jobId}`)
-        if (res.status === 404) {
-          setFetching(false)
-          setJobPolling(false)
-          setFetchProgress(null)
-          await loadDashboard()
-          return
-        }
-        const status = await res.json()
-        setFetchProgress(status)
-        if (status.status === 'done') {
-          setFetching(false)
-          setJobPolling(false)
-          setFetchProgress(null)
-          await loadDashboard()
-          onStockUpdated()
-        } else if (status.status === 'error') {
-          setFetching(false)
-          setJobPolling(false)
-          setError(t('fetchFailed') + ': ' + (status.error || 'unknown error'))
-        } else {
-          setTimeout(check, 3000)
-        }
-      } catch (e) {
-        if (retries < 5) {
-          setTimeout(() => pollJob(jobId, retries + 1), 5000)
-        } else {
-          setFetching(false)
-          setJobPolling(false)
-        }
-      }
+  useEffect(() => {
+    activeJobRef.current = initialJobId || null
+    if (initialJobId) {
+      setFetching(true)
+      setJobPolling(true)
+      pollJob(initialJobId)
     }
-    check()
-  }
+    loadDashboard()
+    return () => {
+      pollGen.current += 1
+    }
+  }, [stockCode, initialJobId])
 
   useEffect(() => {
     if (dashboard?.latest_ccass && !jobPolling && fetching) {
