@@ -18,10 +18,14 @@ from services.ccass_range import (  # noqa: E402
     CCASS_RANGE_OPTIONS,
     assess_ccass_coverage,
     calendar_lookback_days,
+    ccass_backfill_job_ids,
+    ccass_ensure_progress_pct,
     claim_ccass_backfill,
     plan_backfill_query_dates,
+    record_ccass_progress,
     reset_ccass_backfill_state,
     run_ccass_backfill_leader,
+    shared_ccass_progress,
 )
 from scrapers.ccass_scraper import compute_query_to_data_date  # noqa: E402
 
@@ -46,6 +50,14 @@ class CcassRangeMathTests(unittest.TestCase):
         self.assertEqual(calendar_lookback_days(180), int(180 * 1.6))
         self.assertEqual(calendar_lookback_days(365), 365)
         self.assertEqual(calendar_lookback_days(1000), 365)
+
+    def test_ensure_progress_does_not_truncate_the_first_steps_to_zero(self):
+        self.assertEqual(ccass_ensure_progress_pct(0, 260), 0)
+        self.assertEqual(ccass_ensure_progress_pct(1, 260), 1)
+        self.assertEqual(ccass_ensure_progress_pct(2, 260), 1)
+        self.assertEqual(ccass_ensure_progress_pct(3, 260), 2)
+        self.assertEqual(ccass_ensure_progress_pct(260, 260), 99)
+        self.assertEqual(ccass_ensure_progress_pct(1, 0), 0)
 
     def test_coverage_matches_the_ui_windows(self):
         end = datetime(2026, 10, 23)
@@ -137,6 +149,20 @@ class CcassBackfillCoordinatorTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(order, [('start', 90), ('end', 90), ('start', 365), ('end', 365)])
         self.assertEqual(state['status'], 'done')
+
+    def test_follower_is_recorded_on_the_same_progress(self):
+        leader, state = claim_ccass_backfill('00981', 90, 'job-a')
+        self.assertTrue(leader)
+        follower, joined = claim_ccass_backfill('00981', 180, 'job-b')
+        self.assertFalse(follower)
+        self.assertIs(joined, state)
+        ids = record_ccass_progress(state, 27, '2026-10-06')
+        self.assertEqual(ids, ['job-a', 'job-b'])
+        self.assertEqual(ccass_backfill_job_ids(state), ['job-a', 'job-b'])
+        self.assertEqual(shared_ccass_progress(state), (27, '2026-10-06'))
+        # A later date is visible to every job already attached, including the leader.
+        self.assertEqual(record_ccass_progress(state, 40, '2026-10-07'), ['job-a', 'job-b'])
+        self.assertEqual(shared_ccass_progress(state), (40, '2026-10-07'))
 
 
 class CcassBackfillBatchTests(unittest.TestCase):
@@ -306,6 +332,100 @@ class CcassRangeApiTests(unittest.TestCase):
             self.assertEqual(second.json()['backfill'], 'done')
             self.assertEqual(calls, [(code, 180)])
 
+    def _wait_job(self, job_id: str, timeout: float = 3):
+        deadline = time.time() + timeout
+        status = None
+        while time.time() < deadline:
+            status = self.client.get(f'/api/jobs/{job_id}').json()
+            if status['status'] in ('done', 'error'):
+                return status
+            time.sleep(0.02)
+        return status
+
+    def test_follower_fetch_job_shares_leader_progress(self):
+        """A second fetch for the same stock must display the crawl already in progress."""
+        code = '00996'
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def fake_backfill(code_arg, days=90, progress_callback=None, max_workers=2, **kwargs):
+            calls.append(days)
+            if progress_callback:
+                progress_callback(4, 20, '2026-10-06')
+            started.set()
+            release.wait(5)
+            return 4
+
+        try:
+            with patch('scrapers.ccass_scraper.backfill_stock', side_effect=fake_backfill), \
+                    patch('scrapers.trading_scraper.backfill_trading', return_value=1):
+                first = self.client.post(f'/api/stocks/{code}/fetch?days=90')
+                self.assertEqual(first.status_code, 200)
+                self.assertTrue(started.wait(3), 'leader crawl did not start')
+                leader_id = first.json()['job_id']
+                leader = self.client.get(f'/api/jobs/{leader_id}').json()
+                self.assertGreater(leader['progress'], 0)
+                self.assertEqual(leader['current_date'], '2026-10-06')
+
+                second = self.client.post(f'/api/stocks/{code}/fetch?days=90')
+                self.assertEqual(second.status_code, 200)
+                follower_id = second.json()['job_id']
+                self.assertNotEqual(follower_id, leader_id)
+
+                follower = None
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    follower = self.client.get(f'/api/jobs/{follower_id}').json()
+                    if follower.get('progress') == leader['progress'] and follower.get('current_date') == '2026-10-06':
+                        break
+                    time.sleep(0.02)
+                self.assertIsNotNone(follower)
+                self.assertEqual(follower['progress'], leader['progress'])
+                self.assertEqual(follower['current_date'], '2026-10-06')
+                self.assertEqual(follower['status'], 'running')
+                self.assertEqual(calls, [90])
+        finally:
+            release.set()
+
+        done_leader = self._wait_job(leader_id)
+        done_follower = self._wait_job(follower_id)
+        self.assertEqual(done_leader['status'], 'done')
+        self.assertEqual(done_follower['status'], 'done')
+        self.assertEqual(done_leader['progress'], 100)
+        self.assertEqual(done_follower['progress'], 100)
+        self.assertEqual(calls, [90])
+
+    def test_ensure_progress_is_at_least_one_percent_on_the_first_date(self):
+        code = '00997'
+        release = threading.Event()
+
+        def fake_backfill(code_arg, days=90, progress_callback=None, max_workers=2, **kwargs):
+            if progress_callback:
+                progress_callback(1, 260, '2026-01-02')
+            release.wait(5)
+            return 1
+
+        try:
+            with patch('scrapers.ccass_scraper.backfill_stock', side_effect=fake_backfill):
+                body = self.client.post(f'/api/stock/{code}/ccass/ensure?days=365')
+                self.assertEqual(body.status_code, 200)
+                self.assertEqual(body.json()['backfill'], 'running')
+                job_id = body.json()['job_id']
+                seen = None
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    seen = self.client.get(f'/api/jobs/{job_id}').json()
+                    if seen.get('status') == 'running' and seen.get('progress', 0) >= 1:
+                        break
+                    time.sleep(0.02)
+                self.assertEqual(seen['status'], 'running')
+                self.assertEqual(seen['progress'], 1)
+                self.assertEqual(seen['current_date'], '2026-01-02')
+        finally:
+            release.set()
+        self.assertEqual(self._wait_job(job_id)['status'], 'done')
+
     def test_frontend_selector_is_the_fixed_range(self):
         root = os.path.join(os.path.dirname(__file__), '..', '..')
         with open(os.path.join(root, 'frontend/src/components/CcassTab.tsx'), encoding='utf-8') as fh:
@@ -318,6 +438,16 @@ class CcassRangeApiTests(unittest.TestCase):
         self.assertIn('90, 180, 365', flow)
         self.assertIn('ccassBackfillShort', ccass)
         self.assertIn('ccassBackfillShort', flow)
+        self.assertIn("coverage?.backfill === 'running'", ccass)
+        self.assertIn('backfillProgress', ccass)
+        self.assertIn("coverage?.backfill === 'running'", flow)
+        self.assertIn('backfillProgress', flow)
+        with open(os.path.join(root, 'frontend/src/pages/StockDashboard.tsx'), encoding='utf-8') as fh:
+            dashboard = fh.read()
+        with open(os.path.join(root, 'frontend/src/pages/HomePage.tsx'), encoding='utf-8') as fh:
+            home = fh.read()
+        self.assertIn('initialJobId', dashboard)
+        self.assertIn('added.job_id', home)
 
 
 if __name__ == '__main__':

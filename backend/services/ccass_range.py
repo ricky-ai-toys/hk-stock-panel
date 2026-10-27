@@ -5,6 +5,7 @@ capped at 365 calendar days. Longer UI windows (180 / 365 trading sessions)
 reuse the existing rate-limited scraper and never run two crawls for the same
 stock at once.
 """
+import math
 import threading
 import time
 from datetime import datetime, timedelta
@@ -109,11 +110,25 @@ def assess_ccass_coverage(trade_dates, requested_days: int, today: datetime | No
     }
 
 
+def ccass_ensure_progress_pct(done: int, total: int) -> int:
+    """Percent for an on-demand history fill.
+
+    A long window has hundreds of dates, so truncating `done / total` makes the
+    first steps display as 0%. Once any date has finished, the value is at least
+    1 and at most 99 until the job is marked complete.
+    """
+    if done <= 0 or total <= 0:
+        return 0
+    pct = math.ceil((done * 100) / total)
+    return min(99, max(1, int(pct)))
+
+
 def claim_ccass_backfill(code: str, days: int, job_id: str) -> tuple[bool, dict]:
     """Reserve the single CCASS crawl for this stock.
 
     Returns (is_leader, state). A follower just raises `target_days` on the
-    crawl that is already running; the leader picks the higher target up after
+    crawl that is already running and is added to `job_ids`, so every waiter
+    can show the same progress. The leader picks the higher target up after
     the current pass instead of opening a second connection to HKEX.
     """
     days = max(1, min(HKEX_CCASS_MAX_CALENDAR_DAYS, int(days)))
@@ -122,9 +137,11 @@ def claim_ccass_backfill(code: str, days: int, job_id: str) -> tuple[bool, dict]
         state = _runs.get(code)
         if state and state['status'] == 'running':
             state['target_days'] = max(state['target_days'], days)
+            _remember_job_id(state, job_id)
             return False, state
         state = {
             'job_id': job_id,
+            'job_ids': [job_id],
             'target_days': days,
             'status': 'running',
             'error': None,
@@ -134,6 +151,35 @@ def claim_ccass_backfill(code: str, days: int, job_id: str) -> tuple[bool, dict]
         }
         _runs[code] = state
         return True, state
+
+
+def _remember_job_id(state: dict, job_id: str) -> None:
+    """Caller must hold `_guard`."""
+    jobs = state.setdefault('job_ids', [])
+    if job_id not in jobs:
+        jobs.append(job_id)
+
+
+def ccass_backfill_job_ids(state: dict) -> list[str]:
+    with _guard:
+        return list(state.get('job_ids') or ())
+
+
+def record_ccass_progress(state: dict, pct: int, date: str | None) -> list[str]:
+    """Remember the crawl's latest percent and return every job that should show it."""
+    with _guard:
+        state['progress'] = int(pct)
+        if date:
+            state['current_date'] = date
+        return list(state.get('job_ids') or ())
+
+
+def shared_ccass_progress(state: dict) -> tuple[int | None, str | None]:
+    """Latest percent published for this crawl, or `(None, None)` before the first date."""
+    with _guard:
+        if 'progress' not in state:
+            return None, None
+        return state.get('progress'), state.get('current_date')
 
 
 def get_ccass_backfill_state(code: str) -> dict | None:

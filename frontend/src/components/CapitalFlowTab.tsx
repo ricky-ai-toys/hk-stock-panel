@@ -14,6 +14,7 @@ export default function CapitalFlowTab({ stockCode }: { stockCode: string }) {
   const [days, setDays] = useState(1)
   const [endDate, setEndDate] = useState<string>('')
   const [coverage, setCoverage] = useState<any>(null)
+  const [backfillProgress, setBackfillProgress] = useState<number | null>(null)
   const { t, lang, brokerName } = useT()
 
   const load = async (d: number, ed?: string) => {
@@ -35,7 +36,10 @@ export default function CapitalFlowTab({ stockCode }: { stockCode: string }) {
   useEffect(() => { load(days, endDate) }, [stockCode, days, endDate])
 
   useEffect(() => {
-    if (!coverage || coverage.sufficient !== false || coverage.backfill !== 'running' || !coverage.job_id) return
+    if (!coverage || coverage.backfill !== 'running' || !coverage.job_id) {
+      setBackfillProgress(null)
+      return
+    }
     let cancelled = false
     let timer: number | undefined
     const poll = async () => {
@@ -43,6 +47,7 @@ export default function CapitalFlowTab({ stockCode }: { stockCode: string }) {
       try {
         const status = await api.getJobStatus(coverage.job_id)
         if (cancelled) return
+        if (typeof status.progress === 'number') setBackfillProgress(status.progress)
         if (status.status === 'done' || status.status === 'error') {
           load(days, endDate)
           return
@@ -50,14 +55,14 @@ export default function CapitalFlowTab({ stockCode }: { stockCode: string }) {
       } catch {
         // Job row can lag the ensure response.
       }
-      if (!cancelled) timer = window.setTimeout(poll, 5000)
+      if (!cancelled) timer = window.setTimeout(poll, 3000)
     }
-    timer = window.setTimeout(poll, 5000)
+    poll()
     return () => {
       cancelled = true
       if (timer) window.clearTimeout(timer)
     }
-  }, [coverage?.job_id, coverage?.backfill, coverage?.sufficient, stockCode, days, endDate])
+  }, [coverage?.job_id, coverage?.backfill, stockCode, days, endDate])
 
   const dayButtons = [1, 5, 10, 20, 60, 90, 180, 365].map(d => (
     <button
@@ -70,7 +75,8 @@ export default function CapitalFlowTab({ stockCode }: { stockCode: string }) {
       {d}D
     </button>
   ))
-  const shortHistory = coverage && coverage.sufficient === false
+  const backfillRunning = coverage?.backfill === 'running'
+  const backfillLabel = `${t('ccassBackfillShort')}${backfillProgress != null ? ` ${backfillProgress}%` : ''}`
   const hasFlow = !!(data && (data.top_inflows?.length || data.top_outflows?.length || data.shareholder_flows?.length))
 
   if (loading || !hasFlow) {
@@ -80,9 +86,9 @@ export default function CapitalFlowTab({ stockCode }: { stockCode: string }) {
           <h2 className="text-lg font-semibold text-slate-800">🌊 {t('capitalFlow')}</h2>
           <div className="flex items-center gap-2 flex-wrap">{dayButtons}</div>
         </div>
-        {shortHistory && (
+        {backfillRunning && (
           <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-2 rounded-lg text-sm">
-            {t('ccassBackfillShort')}
+            {backfillLabel}
           </div>
         )}
         {loading ? (
@@ -165,9 +171,9 @@ export default function CapitalFlowTab({ stockCode }: { stockCode: string }) {
         </div>
       </div>
 
-      {shortHistory && (
+      {backfillRunning && (
         <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-2 rounded-lg text-sm">
-          {t('ccassBackfillShort')}
+          {backfillLabel}
         </div>
       )}
 

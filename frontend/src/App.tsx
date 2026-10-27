@@ -9,9 +9,15 @@ import LanguageSwitch from './components/LanguageSwitch'
 function AppInner() {
   const { t } = useT()
   const [currentStock, setCurrentStock] = useState<string | null>(null)
+  const [pendingJobId, setPendingJobId] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [stocks, setStocks] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
+
+  const openStock = (code: string, jobId?: string) => {
+    setPendingJobId(jobId || null)
+    setCurrentStock(code)
+  }
 
   const loadStocks = async () => {
     try {
@@ -35,7 +41,15 @@ function AppInner() {
   }
 
   if (currentStock) {
-    return <StockDashboard stockCode={currentStock} onBack={() => { setCurrentStock(null); loadStocks() }} onStockUpdated={loadStocks} />
+    return (
+      <StockDashboard
+        key={currentStock}
+        stockCode={currentStock}
+        initialJobId={pendingJobId}
+        onBack={() => { setPendingJobId(null); setCurrentStock(null); loadStocks() }}
+        onStockUpdated={loadStocks}
+      />
+    )
   }
 
   return (
@@ -49,7 +63,7 @@ function AppInner() {
           {t('settings')}
         </button>
       </div>
-      <HomePage stocks={stocks} onSelectStock={setCurrentStock} onStocksChange={loadStocks} />
+      <HomePage stocks={stocks} onSelectStock={openStock} onStocksChange={loadStocks} />
     </div>
   )
 }
